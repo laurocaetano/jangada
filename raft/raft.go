@@ -54,7 +54,7 @@ func (r *Raft) setState(state State) {
 func (r *Raft) setCurrentTerm(newTerm uint64) {
 	r.currentTermLock.Lock()
 	defer r.currentTermLock.Unlock()
-	r.currentTerm++
+	r.currentTerm = newTerm
 }
 
 func (r *Raft) getCurrentTerm() uint64 {
