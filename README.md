@@ -1,3 +1,5 @@
+[![Go](https://github.com/laurocaetano/jangada/actions/workflows/go.yml/badge.svg?branch=main)](https://github.com/laurocaetano/jangada/actions/workflows/go.yml)
+
 # Jangada
 
 This project is a learning project!
