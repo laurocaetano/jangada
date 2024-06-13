@@ -4,6 +4,131 @@ import (
 	"testing"
 )
 
+// The tests in this function are purposely verbose.
+// They are written with lots of repetition to make it clear
+// what are the pre and post condition for each case.
+//
+// The aim in these test files is to give an overview, top to bottom, of what it is
+// testing, without the need to jump to helper functions and etc.
+//
+// Perhaps when the code evolves, I will re-factor the test cases to make them prettier
+// and less verbose.
+func TestHandleVote(t *testing.T) {
+	candidateNode := Node{
+		id:      "peer-one",
+		address: "10.0.0.1",
+	}
+
+	localNode := Node{
+		id:      "peer-three",
+		address: "10.0.0.3",
+	}
+
+	lastLogEntry := Log{
+		Index: 20,
+		Term:  10,
+	}
+
+	raft := Raft{
+		localNode:   localNode,
+		state:       Follower,
+		peers:       []Node{},
+		currentTerm: 10,
+		log:         []Log{lastLogEntry},
+	}
+
+	// In case the candidate's term is lower
+	voteRequest := RequestVoteRequest{
+		Term:         raft.getCurrentTerm() - 1,
+		CandidateId:  candidateNode.id,
+		LastLogIndex: 19,
+		LastLogTerm:  9,
+	}
+
+	// The vote should not be granted
+	response := raft.handleVoteRequest(voteRequest)
+	if response.VoteGranted {
+		t.Errorf("expected vote not to be granted for request %v", voteRequest)
+	}
+
+	// In case vote has been already granted
+	var votedFor NodeId = "123"
+	raft.votedFor = &votedFor
+	voteRequest = RequestVoteRequest{
+		Term:         raft.getCurrentTerm() + 1,
+		CandidateId:  candidateNode.id,
+		LastLogIndex: 19,
+		LastLogTerm:  9,
+	}
+
+	// The vote should not be granted
+	response = raft.handleVoteRequest(voteRequest)
+	if response.VoteGranted {
+		t.Errorf("expected vote not to be granted for request %v", voteRequest)
+	}
+
+	// Clear last vote
+	raft.votedFor = nil
+
+	// In case there is no vote yet but candidate's log index is lower
+	voteRequest = RequestVoteRequest{
+		Term:         raft.getCurrentTerm() + 1,
+		CandidateId:  candidateNode.id,
+		LastLogIndex: lastLogEntry.Index - 1,
+		LastLogTerm:  9,
+	}
+
+	// The vote should not be granted
+	response = raft.handleVoteRequest(voteRequest)
+	if response.VoteGranted {
+		t.Errorf("expected vote not to be granted for request %v", voteRequest)
+	}
+
+	// In case there is no vote yet but candidate's log term is lower
+	voteRequest = RequestVoteRequest{
+		Term:         raft.getCurrentTerm() + 1,
+		CandidateId:  candidateNode.id,
+		LastLogIndex: lastLogEntry.Index,
+		LastLogTerm:  lastLogEntry.Term - 1,
+	}
+
+	// The vote should not be granted
+	response = raft.handleVoteRequest(voteRequest)
+	if response.VoteGranted {
+		t.Errorf("expected vote not to be granted for request %v", voteRequest)
+	}
+
+	// In case there is no vote and the candidates' term is at least as
+	// up-to-date
+	voteRequest = RequestVoteRequest{
+		Term:         raft.getCurrentTerm() + 1,
+		CandidateId:  candidateNode.id,
+		LastLogIndex: lastLogEntry.Index,
+		LastLogTerm:  lastLogEntry.Term,
+	}
+
+	// The vote should be granted
+	response = raft.handleVoteRequest(voteRequest)
+	if !response.VoteGranted && raft.votedFor != &candidateNode.id {
+		t.Errorf("expected vote to be granted for request %v", voteRequest)
+	}
+
+	// In case the last vote was for the same candidate
+	raft.votedFor = &candidateNode.id
+	voteRequest = RequestVoteRequest{
+		Term:         raft.getCurrentTerm() + 1,
+		CandidateId:  candidateNode.id,
+		LastLogIndex: lastLogEntry.Index,
+		LastLogTerm:  lastLogEntry.Term,
+	}
+
+	// The vote should be granted
+	response = raft.handleVoteRequest(voteRequest)
+	if !response.VoteGranted && raft.votedFor != &candidateNode.id {
+		t.Errorf("expected vote to be granted for request %v", voteRequest)
+	}
+}
+
 func TestLeaderElectionSuccessful(t *testing.T) {
 	peerOne := Node{
 		id:      "peer-one",

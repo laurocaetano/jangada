@@ -1,6 +1,8 @@
 package raft
 
-import "sync"
+import (
+	"sync"
+)
 
 type (
 	State  uint
@@ -25,14 +27,21 @@ type Node struct {
 }
 
 type Raft struct {
-	leaderNode      Node
-	localNode       Node
-	state           State
-	stateLock       sync.RWMutex
+	leaderNode Node
+	localNode  Node
+
+	state     State
+	stateLock sync.RWMutex
+
 	currentTerm     uint64
 	currentTermLock sync.RWMutex
-	log             []Log
-	logLock         sync.RWMutex
+
+	log     []Log
+	logLock sync.RWMutex
+
+	votedFor     *NodeId
+	votedForLock sync.Mutex
+
 	peers           []Node
 	transport       Transport
 	cancelationChan chan struct{}
@@ -72,6 +81,38 @@ func (r *Raft) getLatestLog() Log {
 		return Log{}
 	} else {
 		return r.log[len(r.log)-1]
+	}
+}
+
+func (r *Raft) handleVoteRequest(voteRequest RequestVoteRequest) RequestVoteResponse {
+	r.votedForLock.Lock()
+	defer r.votedForLock.Unlock()
+
+	if voteRequest.Term < r.getCurrentTerm() {
+		return RequestVoteResponse{
+			Term:        r.getCurrentTerm(),
+			VoteGranted: false,
+		}
+	}
+
+	// if has not voted yet for the current term, or has voted for the same candidateId
+	if r.votedFor == nil || *r.votedFor == voteRequest.CandidateId {
+		latestLog := r.getLatestLog()
+		// Only grant vote in case candidate's log is at least as up-to-date as us
+		if voteRequest.LastLogTerm >= latestLog.Term && voteRequest.LastLogIndex >= latestLog.Index {
+			// Save the vote for the current term
+			r.votedFor = &voteRequest.CandidateId
+
+			return RequestVoteResponse{
+				Term:        r.getCurrentTerm(),
+				VoteGranted: true,
+			}
+		}
+	}
+
+	return RequestVoteResponse{
+		Term:        r.getCurrentTerm(),
+		VoteGranted: false,
 	}
 }
 
