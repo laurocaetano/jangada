@@ -216,6 +216,10 @@ type FakeTestTransport struct {
 	responseForNode map[Node]RequestVoteResponse
 }
 
+func (f FakeTestTransport) AppendEntries(AppendEntriesRequest AppendEntriesRequest) (AppendEntriesResponse, error) {
+	return AppendEntriesResponse{}, nil
+}
+
 func (f FakeTestTransport) RequestVote(request RequestVoteRequest, peer Node) (RequestVoteResponse, error) {
 	return f.responseForNode[peer], nil
 }
