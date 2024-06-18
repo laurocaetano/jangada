@@ -2,6 +2,7 @@ package raft
 
 import (
 	"sync"
+	"time"
 )
 
 type (
@@ -28,7 +29,9 @@ type Node struct {
 
 type Raft struct {
 	leaderNode Node
-	localNode  Node
+	leaderLock sync.RWMutex
+
+	localNode Node
 
 	state     State
 	stateLock sync.RWMutex
@@ -36,7 +39,8 @@ type Raft struct {
 	currentTerm     uint64
 	currentTermLock sync.RWMutex
 
-	log     []Log
+	// LogIndex -> Log
+	log     map[uint64]Log
 	logLock sync.RWMutex
 
 	votedFor     *NodeId
@@ -45,6 +49,50 @@ type Raft struct {
 	peers           []Node
 	transport       Transport
 	cancelationChan chan struct{}
+
+	commitIndex     uint64
+	commitIndexLock sync.RWMutex
+
+	lastContact     time.Time
+	lastContactLock sync.RWMutex
+
+	lastLog     Log
+	lastLogLock sync.RWMutex
+}
+
+func (r *Raft) setLastContact() {
+	r.lastContactLock.Lock()
+	defer r.lastContactLock.Unlock()
+
+	r.lastContact = time.Now()
+}
+
+func (r *Raft) getLastContact() time.Time {
+	r.lastContactLock.RLock()
+	defer r.lastContactLock.RUnlock()
+
+	return r.lastContact
+}
+
+func (r *Raft) setLeader(leader Node) {
+	r.leaderLock.Lock()
+	defer r.leaderLock.Unlock()
+
+	r.leaderNode = leader
+}
+
+func (r *Raft) getCommitIndex() uint64 {
+	r.commitIndexLock.RLock()
+	defer r.commitIndexLock.RUnlock()
+
+	return r.commitIndex
+}
+
+func (r *Raft) setCommitIndex(newIndex uint64) {
+	r.commitIndexLock.Lock()
+	defer r.commitIndexLock.Unlock()
+
+	r.commitIndex = newIndex
 }
 
 func (r *Raft) getCurrentState() State {
@@ -72,15 +120,121 @@ func (r *Raft) getCurrentTerm() uint64 {
 	return r.currentTerm
 }
 
-// Returns the latest log item, or nothing (empty Log Struct)
-func (r *Raft) getLatestLog() Log {
+func (r *Raft) getLogAtIndex(index uint64) Log {
 	r.logLock.RLock()
 	defer r.logLock.RUnlock()
 
-	if len(r.log) <= 0 {
+	log, ok := r.log[index]
+	if !ok {
 		return Log{}
-	} else {
-		return r.log[len(r.log)-1]
+	}
+
+	return log
+}
+
+func (r *Raft) deleteLogsFrom(start, end uint64) {
+	r.logLock.Lock()
+	defer r.logLock.Unlock()
+
+	for i := start; i <= end; i++ {
+		delete(r.log, i)
+	}
+}
+
+func (r *Raft) appendEntries(entries []Log) error {
+	r.logLock.Lock()
+	defer r.logLock.Unlock()
+
+	for _, entry := range entries {
+		r.log[entry.Index] = entry
+	}
+
+	// Once this has real IO, it may return actual errors
+	return nil
+}
+
+// Returns the latest log item, or nothing (empty Log Struct)
+func (r *Raft) getLastLog() Log {
+	r.lastLogLock.RLock()
+	defer r.lastLogLock.RUnlock()
+
+	return r.lastLog
+}
+
+func (r *Raft) setLastLog(latest Log) {
+	r.lastLogLock.Lock()
+	defer r.lastLogLock.Unlock()
+
+	r.lastLog = latest
+}
+
+func (r *Raft) processAppendEntries(appendEntriesRequest AppendEntriesRequest) AppendEntriesResponse {
+	if appendEntriesRequest.Term < r.getCurrentTerm() {
+		return AppendEntriesResponse{
+			Term:    r.getCurrentTerm(),
+			Success: false,
+		}
+	}
+
+	lastLogAtIndex := r.getLogAtIndex(appendEntriesRequest.PrevLogIndex)
+
+	if lastLogAtIndex.Term != appendEntriesRequest.PrevLogTerm {
+		return AppendEntriesResponse{
+			Term:    r.getCurrentTerm(),
+			Success: false,
+		}
+	}
+
+	// Set leaderId
+	r.setLeader(appendEntriesRequest.LeaderNode)
+
+	// Set state to Follower
+	r.setState(Follower)
+
+	// Handle new entries
+	if len(appendEntriesRequest.Entries) > 0 {
+		lastLog := r.getLastLog()
+		var newEntries []Log
+
+		// Delete conflicting logs
+		for i, entry := range appendEntriesRequest.Entries {
+			if entry.Index > lastLog.Index {
+				newEntries = appendEntriesRequest.Entries[i:]
+				break
+			}
+
+			logAtIndex := r.getLogAtIndex(entry.Index)
+
+			if entry.Term != logAtIndex.Term {
+				// delete log entries since the diff
+				r.deleteLogsFrom(entry.Index, lastLog.Index)
+
+				// append everything
+				newEntries = appendEntriesRequest.Entries[i:]
+				break
+			}
+		}
+
+		if len(newEntries) > 0 {
+			// Append new entries
+			r.appendEntries(newEntries)
+
+			lastEntry := newEntries[len(newEntries)-1]
+			r.setLastLog(lastEntry)
+		}
+
+		lastNewEntry := r.getLastLog()
+		if appendEntriesRequest.LeaderCommit > r.getCommitIndex() {
+			r.setCommitIndex(min(appendEntriesRequest.LeaderCommit, lastNewEntry.Index))
+		}
+	}
+
+	// Reset timer: set lastContact
+	r.setLastContact()
+
+	return AppendEntriesResponse{
+		Term:    r.getCurrentTerm(),
+		Success: true,
 	}
 }
 
@@ -97,7 +251,7 @@ func (r *Raft) handleVoteRequest(voteRequest RequestVoteRequest) RequestVoteResp
 
 	// if has not voted yet for the current term, or has voted for the same candidateId
 	if r.votedFor == nil || *r.votedFor == voteRequest.CandidateId {
-		latestLog := r.getLatestLog()
+		latestLog := r.getLastLog()
 		// Only grant vote in case candidate's log is at least as up-to-date as us
 		if voteRequest.LastLogTerm >= latestLog.Term && voteRequest.LastLogIndex >= latestLog.Index {
 			// Save the vote for the current term
@@ -128,7 +282,7 @@ func (r *Raft) startElection() {
 	// Candidate always starts with a vote to itself
 	grantedVotes := 1
 
-	lastLogEntry := r.getLatestLog()
+	lastLogEntry := r.getLastLog()
 
 	// send request votes
 	voteResponseChan := make(chan RequestVoteResponse, len(r.peers))

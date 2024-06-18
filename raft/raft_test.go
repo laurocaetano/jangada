@@ -1,7 +1,9 @@
 package raft
 
 import (
+	"reflect"
 	"testing"
+	"time"
 )
 
 // The tests in this function are purposely verbose.
@@ -34,7 +36,7 @@ func TestHandleVote(t *testing.T) {
 		state:       Follower,
 		peers:       []Node{},
 		currentTerm: 10,
-		log:         []Log{lastLogEntry},
+		lastLog:     lastLogEntry,
 	}
 
 	// In case the candidate's term is lower
@@ -210,6 +212,132 @@ func TestLeaderElectionNotSuccessful(t *testing.T) {
 	}
 
 	raft.startElection()
+}
+
+func TestProcessAppendEntries(t *testing.T) {
+	logMap := make(map[uint64]Log)
+	log := Log{
+		Index: 99,
+		Term:  99,
+	}
+	logMap[log.Index] = log
+
+	raft := Raft{
+		currentTerm: 11,
+		log:         logMap,
+	}
+
+	appendEntry := AppendEntriesRequest{
+		Term: raft.getCurrentTerm() - 1,
+	}
+
+	// In case the given term is lower, return false
+	response := raft.processAppendEntries(appendEntry)
+	if response.Success {
+		t.Errorf("expected append entry to return false")
+	}
+
+	appendEntry = AppendEntriesRequest{
+		Term:        raft.getCurrentTerm(),
+		PrevLogTerm: log.Term + 1,
+	}
+
+	// In case the previous logIndex has a diff term than the request, return false
+	response = raft.processAppendEntries(appendEntry)
+	if response.Success {
+		t.Errorf("expected append entry to return false")
+	}
+
+	leaderNode := Node{
+		id:      "123",
+		address: "0.0.0.0",
+	}
+
+	appendEntry = AppendEntriesRequest{
+		Term:         raft.getCurrentTerm(),
+		PrevLogTerm:  log.Term,
+		PrevLogIndex: log.Index,
+		LeaderNode:   leaderNode,
+	}
+
+	// In case it's a valid request with no log entry, treat it as a heartbeat
+	response = raft.processAppendEntries(appendEntry)
+	if !response.Success {
+		t.Errorf("expected append entry to return true ")
+	}
+	if raft.leaderNode != leaderNode {
+		t.Errorf("expected leader to be %v, but was %v", leaderNode, raft.leaderNode)
+	}
+	if raft.getCurrentState() != Follower {
+		t.Errorf("expected state to be Follower, but was %v", raft.getCurrentState())
+	}
+
+	newLogEntry := Log{
+		Term:  log.Term + 1,
+		Index: log.Index + 1,
+	}
+	appendEntry = AppendEntriesRequest{
+		Term:         raft.getCurrentTerm(),
+		PrevLogTerm:  log.Term,
+		PrevLogIndex: log.Index,
+		LeaderNode:   leaderNode,
+		Entries:      []Log{newLogEntry},
+	}
+
+	// In case it's a valid request with only a new entry
+	response = raft.processAppendEntries(appendEntry)
+	if !response.Success {
+		t.Errorf("expected append entry to return true ")
+	}
+	if !reflect.DeepEqual(raft.getLastLog(), newLogEntry) {
+		t.Errorf("expected the last log to be set to %v, but was %v", newLogEntry, raft.getLastLog())
+	}
+
+	appendEntry = AppendEntriesRequest{
+		Term:         raft.getCurrentTerm(),
+		PrevLogTerm:  log.Term,
+		PrevLogIndex: log.Index,
+		LeaderNode:   leaderNode,
+		// In case of entry pointing to an existing entry
+		Entries: []Log{log},
+	}
+
+	// The last entry should still apply
+	response = raft.processAppendEntries(appendEntry)
+	if !response.Success {
+		t.Errorf("expected append entry to return true ")
+	}
+	if !reflect.DeepEqual(raft.getLastLog(), newLogEntry) {
+		t.Errorf("expected the last log to be set to %v, but was %v", newLogEntry, raft.getLastLog())
+	}
+
+	updatedEntry := Log{
+		Term:  log.Term + 1,
+		Index: log.Index,
+	}
+	appendEntry = AppendEntriesRequest{
+		Term:         raft.getCurrentTerm(),
+		PrevLogTerm:  log.Term,
+		PrevLogIndex: log.Index,
+		LeaderNode:   leaderNode,
+		Entries:      []Log{updatedEntry},
+		LeaderCommit: log.Term + 1,
+	}
+
+	startTime := time.Now()
+	// It should delete the previous entry and update with the new one
+	response = raft.processAppendEntries(appendEntry)
+	if !reflect.DeepEqual(raft.getLastLog(), updatedEntry) {
+		t.Errorf("expected the last log to be set to %v, but was %v", updatedEntry, raft.getLastLog())
+	}
+	if raft.getCommitIndex() != updatedEntry.Index {
+		t.Errorf("expected leader commit to be %v, but was %v", updatedEntry.Index, raft.getCommitIndex())
+	}
+
+	// it shoud set the last contact
+	if !startTime.Before(raft.getLastContact()) {
+		t.Errorf("expected the last contact to be after %v, but it was set to %v", startTime, raft.getLastContact())
+	}
 }
 
 type FakeTestTransport struct {

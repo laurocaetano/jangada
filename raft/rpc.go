@@ -17,7 +17,7 @@ type AppendEntriesRequest struct {
 	Term uint64 `json:"term"`
 
 	// So that followers can redirect requests to learder
-	LeaderId NodeId `json:"leader_id"`
+	LeaderNode Node `json:"leader_node"`
 
 	// Index of the log entry immediately preceding new ones
 	PrevLogIndex uint64 `json:"prev_log_index"`
