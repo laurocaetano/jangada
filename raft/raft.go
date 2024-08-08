@@ -205,9 +205,19 @@ func (r *Raft) sendAppendEntries(newEntries []Log) error {
 	responseChan := make(chan peerResponse, len(r.peers))
 	heartbeatRequest := len(newEntries) == 0
 	lastLog := r.getLastLog()
+	var wg sync.WaitGroup
+
+	wg.Add(len(r.peers))
+
+	go func() {
+		wg.Wait()
+		close(responseChan)
+	}()
 
 	for _, peer := range r.peers {
 		go func(peer Node) {
+			defer wg.Done()
+
 			request := AppendEntriesRequest{
 				Term:         r.getCurrentTerm(),
 				LeaderNode:   r.localNode,
@@ -228,13 +238,11 @@ func (r *Raft) sendAppendEntries(newEntries []Log) error {
 	// simple majority of all nodes (peers + self)
 	miniumQuorum := ((len(r.peers) + 1) / 2) + 1
 
-	select {
-	case res := <-responseChan:
+	for res := range responseChan {
 		if !res.response.Success {
 			r.decreaseIndexForPeer(res.peer)
 		} else {
 			// update next log index for the node
-
 			writeQuorum++
 		}
 	}
