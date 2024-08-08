@@ -344,7 +344,7 @@ type FakeTestTransport struct {
 	responseForNode map[Node]RequestVoteResponse
 }
 
-func (f FakeTestTransport) AppendEntries(AppendEntriesRequest AppendEntriesRequest) (AppendEntriesResponse, error) {
+func (f FakeTestTransport) AppendEntries(AppendEntriesRequest AppendEntriesRequest, peer Node) (AppendEntriesResponse, error) {
 	return AppendEntriesResponse{}, nil
 }
 

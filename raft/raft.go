@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"errors"
 	"sync"
 	"time"
 )
@@ -43,6 +44,12 @@ type Raft struct {
 	log     map[uint64]Log
 	logLock sync.RWMutex
 
+	nextIndexForPeers     map[NodeId]uint64
+	nextIndexForPeersLock sync.RWMutex
+
+	peersTerms     map[NodeId]uint64
+	peersTermsLock sync.RWMutex
+
 	votedFor     *NodeId
 	votedForLock sync.Mutex
 
@@ -58,6 +65,27 @@ type Raft struct {
 
 	lastLog     Log
 	lastLogLock sync.RWMutex
+}
+
+func (r *Raft) setPeerTerm(peer NodeId, term uint64) {
+	r.peersTermsLock.Lock()
+	defer r.peersTermsLock.Unlock()
+
+	r.peersTerms[peer] = term
+}
+
+func (r *Raft) setNextIndexForPeer(nodeId NodeId, nextLogIndex uint64) {
+	r.nextIndexForPeersLock.Lock()
+	defer r.nextIndexForPeersLock.Unlock()
+
+	r.nextIndexForPeers[nodeId] = nextLogIndex
+}
+
+func (r *Raft) decreaseIndexForPeer(nodeId NodeId) {
+	r.nextIndexForPeersLock.Lock()
+	defer r.nextIndexForPeersLock.Unlock()
+
+	r.nextIndexForPeers[nodeId]--
 }
 
 func (r *Raft) setLastContact() {
@@ -168,17 +196,59 @@ func (r *Raft) setLastLog(latest Log) {
 	r.lastLog = latest
 }
 
-func (r *Raft) processAppendEntries(appendEntriesRequest AppendEntriesRequest) AppendEntriesResponse {
-	if appendEntriesRequest.Term < r.getCurrentTerm() {
-		return AppendEntriesResponse{
-			Term:    r.getCurrentTerm(),
-			Success: false,
+func (r *Raft) sendAppendEntries(newEntries []Log) error {
+	type peerResponse struct {
+		peer     NodeId
+		response AppendEntriesResponse
+	}
+
+	responseChan := make(chan peerResponse, len(r.peers))
+	heartbeatRequest := len(newEntries) == 0
+	lastLog := r.getLastLog()
+
+	for _, peer := range r.peers {
+		go func(peer Node) {
+			request := AppendEntriesRequest{
+				Term:         r.getCurrentTerm(),
+				LeaderNode:   r.localNode,
+				Entries:      newEntries,
+				PrevLogIndex: lastLog.Term,
+				PrevLogTerm:  lastLog.Term,
+			}
+			response, error := r.transport.AppendEntries(request, peer)
+			if error != nil {
+				// Log node is probably offline or unreachable - try again with same log index next time around
+			} else {
+				responseChan <- peerResponse{peer.id, response}
+			}
+		}(peer)
+	}
+
+	writeQuorum := 1 // Count self
+	// simple majority of all nodes (peers + self)
+	miniumQuorum := ((len(r.peers) + 1) / 2) + 1
+
+	select {
+	case res := <-responseChan:
+		if !res.response.Success {
+			r.decreaseIndexForPeer(res.peer)
+		} else {
+			// update next log index for the node
+
+			writeQuorum++
 		}
 	}
 
-	lastLogAtIndex := r.getLogAtIndex(appendEntriesRequest.PrevLogIndex)
+	// In case of heartbeat, we can skip this check
+	if writeQuorum < miniumQuorum && !heartbeatRequest {
+		return errors.New("unable to reach consensus")
+	}
 
-	if lastLogAtIndex.Term != appendEntriesRequest.PrevLogTerm {
+	return nil
+}
+
+func (r *Raft) processAppendEntries(appendEntriesRequest AppendEntriesRequest) AppendEntriesResponse {
+	if appendEntriesRequest.Term < r.getCurrentTerm() {
 		return AppendEntriesResponse{
 			Term:    r.getCurrentTerm(),
 			Success: false,
@@ -190,6 +260,19 @@ func (r *Raft) processAppendEntries(appendEntriesRequest AppendEntriesRequest) A
 
 	// Set state to Follower
 	r.setState(Follower)
+
+	lastLogAtIndex := r.getLogAtIndex(appendEntriesRequest.PrevLogIndex)
+
+	if lastLogAtIndex.Term != appendEntriesRequest.PrevLogTerm {
+		// Reset timer: set lastContact
+		// Still a valid heartbeat
+		r.setLastContact()
+
+		return AppendEntriesResponse{
+			Term:    r.getCurrentTerm(),
+			Success: false,
+		}
+	}
 
 	// Handle new entries
 	if len(appendEntriesRequest.Entries) > 0 {

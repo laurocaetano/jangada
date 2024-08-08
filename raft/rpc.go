@@ -34,13 +34,13 @@ type AppendEntriesRequest struct {
 
 type AppendEntriesResponse struct {
 	// Current term, for leader to update itself
-	Term uint64
+	Term uint64 `json:"term"`
 
 	// true if follower contained entry matching prevLogEntry and prevLogIndex
-	Success bool
+	Success bool `json:"success"`
 }
 
 type Transport interface {
 	RequestVote(request RequestVoteRequest, peer Node) (RequestVoteResponse, error)
-	AppendEntries(appendEntryRequest AppendEntriesRequest) (AppendEntriesResponse, error)
+	AppendEntries(appendEntryRequest AppendEntriesRequest, peer Node) (AppendEntriesResponse, error)
 }
