@@ -238,11 +238,12 @@ func (r *Raft) sendAppendEntries(newEntries []Log) error {
 	// simple majority of all nodes (peers + self)
 	miniumQuorum := ((len(r.peers) + 1) / 2) + 1
 
+	var replicatedPeers []NodeId
 	for res := range responseChan {
 		if !res.response.Success {
+			replicatedPeers = append(replicatedPeers, res.peer)
 			r.decreaseIndexForPeer(res.peer)
 		} else {
-			// update next log index for the node
 			writeQuorum++
 		}
 	}
@@ -250,6 +251,20 @@ func (r *Raft) sendAppendEntries(newEntries []Log) error {
 	// In case of heartbeat, we can skip this check
 	if writeQuorum < miniumQuorum && !heartbeatRequest {
 		return errors.New("unable to reach consensus")
+	}
+
+	if len(newEntries) > 0 {
+		// commit new entries
+		r.appendEntries(newEntries)
+
+		lastEntry := newEntries[len(newEntries)-1]
+
+		r.setLastLog(lastEntry)
+		r.setCommitIndex(lastEntry.Index)
+
+		for _, peerId := range replicatedPeers {
+			r.setNextIndexForPeer(peerId, lastEntry.Index+1)
+		}
 	}
 
 	return nil
