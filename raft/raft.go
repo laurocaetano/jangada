@@ -2,7 +2,6 @@ package raft
 
 import (
 	"errors"
-	"fmt"
 	"sync"
 	"time"
 )
@@ -70,9 +69,6 @@ func NewRaft(peers []Node, localNode Node, transport Transport) Raft {
 	nextIndexForPeers := make(map[NodeId]uint64)
 	for _, peer := range peers {
 		nextIndexForPeers[peer.id] = 1
-	}
-	for _, index := range nextIndexForPeers {
-		fmt.Println(index)
 	}
 
 	return Raft{

@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"errors"
 	"reflect"
 	"testing"
 	"time"
@@ -256,7 +257,11 @@ func TestSendAppendEntries(t *testing.T) {
 
 	newEntry := []byte("My new Entry")
 
-	raft.sendAppendEntries([][]byte{newEntry})
+	response := raft.sendAppendEntries([][]byte{newEntry})
+
+	if response.Error() != errors.New("unable to reach consensus").Error() {
+		t.Errorf("it should have not reached consensus, but it did")
+	}
 
 	// in case the peers did not accept the append entries, do not update latest commit index
 	if raft.getCommitIndex() > 0 {
