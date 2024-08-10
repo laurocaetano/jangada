@@ -36,8 +36,10 @@ func TestHandleVote(t *testing.T) {
 		state:       Follower,
 		peers:       []Node{},
 		currentTerm: 10,
-		lastLog:     lastLogEntry,
 	}
+
+	raft.appendEntries([]Log{lastLogEntry})
+	raft.setCommitIndex(lastLogEntry.Index)
 
 	// In case the candidate's term is lower
 	voteRequest := RequestVoteRequest{
@@ -158,7 +160,7 @@ func TestLeaderElectionSuccessful(t *testing.T) {
 		VoteGranted: true,
 	}
 
-	fakeTransport := FakeTestTransport{fakeResponse}
+	fakeTransport := FakeTestTransport{fakeResponse, nil}
 
 	raft := Raft{
 		localNode: localNode,
@@ -202,7 +204,7 @@ func TestLeaderElectionNotSuccessful(t *testing.T) {
 		VoteGranted: false,
 	}
 
-	fakeTransport := FakeTestTransport{fakeResponse}
+	fakeTransport := FakeTestTransport{fakeResponse, nil}
 
 	raft := Raft{
 		localNode: localNode,
@@ -212,6 +214,65 @@ func TestLeaderElectionNotSuccessful(t *testing.T) {
 	}
 
 	raft.startElection()
+}
+
+func TestSendAppendEntries(t *testing.T) {
+	// A raft with no log entries yet
+	peer1 := Node{
+		id:      "node01",
+		address: "0.0.0.1",
+	}
+
+	peer2 := Node{
+		id:      "node02",
+		address: "0.0.0.2",
+	}
+
+	leaderNode := Node{
+		id:      "leaderNode",
+		address: "0.0.0.3",
+	}
+
+	peers := []Node{peer1, peer2}
+
+	fakeResponseMap := make(map[Node]AppendEntriesResponse)
+
+	fakeResponseMap[peer1] = AppendEntriesResponse{
+		Term:    1,
+		Success: false,
+	}
+
+	fakeResponseMap[peer2] = AppendEntriesResponse{
+		Term:    1,
+		Success: false,
+	}
+
+	fakeTransport := FakeTestTransport{nil, fakeResponseMap}
+
+	raft := NewRaft(peers, leaderNode, fakeTransport)
+	// Fake this current instance is the leader
+	raft.setState(Leader)
+	raft.setCurrentTerm(1)
+
+	newEntry := []byte("My new Entry")
+
+	raft.sendAppendEntries([][]byte{newEntry})
+
+	// in case the peers did not accept the append entries, do not update latest commit index
+	if raft.getCommitIndex() > 0 {
+		t.Errorf("did not expect commit index to increase when there is no consensus")
+	}
+
+	// it should have decreased the nextIndexForPeers
+	for _, peer := range peers {
+		if raft.nextIndexForPeers[peer1.id] > 0 {
+			t.Errorf("nextIndexFor peer %v expected to be %v, got: %v",
+				peer.id,
+				0,
+				raft.nextIndexForPeers[peer.id],
+			)
+		}
+	}
 }
 
 func TestProcessAppendEntries(t *testing.T) {
@@ -341,11 +402,12 @@ func TestProcessAppendEntries(t *testing.T) {
 }
 
 type FakeTestTransport struct {
-	responseForNode map[Node]RequestVoteResponse
+	responseForNode            map[Node]RequestVoteResponse
+	voteRequestResponseForNode map[Node]AppendEntriesResponse
 }
 
 func (f FakeTestTransport) AppendEntries(AppendEntriesRequest AppendEntriesRequest, peer Node) (AppendEntriesResponse, error) {
-	return AppendEntriesResponse{}, nil
+	return f.voteRequestResponseForNode[peer], nil
 }
 
 func (f FakeTestTransport) RequestVote(request RequestVoteRequest, peer Node) (RequestVoteResponse, error) {

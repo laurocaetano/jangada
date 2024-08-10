@@ -2,6 +2,7 @@ package raft
 
 import (
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -62,9 +63,29 @@ type Raft struct {
 
 	lastContact     time.Time
 	lastContactLock sync.RWMutex
+}
 
-	lastLog     Log
-	lastLogLock sync.RWMutex
+func NewRaft(peers []Node, localNode Node, transport Transport) Raft {
+	peersTerms := make(map[NodeId]uint64)
+	nextIndexForPeers := make(map[NodeId]uint64)
+	for _, peer := range peers {
+		nextIndexForPeers[peer.id] = 1
+	}
+	for _, index := range nextIndexForPeers {
+		fmt.Println(index)
+	}
+
+	return Raft{
+		peers:             peers,
+		localNode:         localNode,
+		state:             Follower,
+		commitIndex:       0,
+		currentTerm:       0,
+		log:               make(map[uint64]Log),
+		transport:         transport,
+		peersTerms:        peersTerms,
+		nextIndexForPeers: nextIndexForPeers,
+	}
 }
 
 func (r *Raft) setPeerTerm(peer NodeId, term uint64) {
@@ -173,6 +194,10 @@ func (r *Raft) appendEntries(entries []Log) error {
 	r.logLock.Lock()
 	defer r.logLock.Unlock()
 
+	if r.log == nil {
+		r.log = make(map[uint64]Log)
+	}
+
 	for _, entry := range entries {
 		r.log[entry.Index] = entry
 	}
@@ -181,57 +206,71 @@ func (r *Raft) appendEntries(entries []Log) error {
 	return nil
 }
 
-// Returns the latest log item, or nothing (empty Log Struct)
 func (r *Raft) getLastLog() Log {
-	r.lastLogLock.RLock()
-	defer r.lastLogLock.RUnlock()
-
-	return r.lastLog
+	return r.getLogAtIndex(r.getCommitIndex())
 }
 
-func (r *Raft) setLastLog(latest Log) {
-	r.lastLogLock.Lock()
-	defer r.lastLogLock.Unlock()
-
-	r.lastLog = latest
+type appendEntriesPeerResponse struct {
+	peer     NodeId
+	response AppendEntriesResponse
 }
 
-func (r *Raft) sendAppendEntries(newEntries []Log) error {
-	type peerResponse struct {
-		peer     NodeId
-		response AppendEntriesResponse
-	}
+func (r *Raft) sendAppendEntriesRequest(entries []Log) chan appendEntriesPeerResponse {
+	responseChan := make(chan appendEntriesPeerResponse, len(r.peers))
 
-	responseChan := make(chan peerResponse, len(r.peers))
-	heartbeatRequest := len(newEntries) == 0
-	lastLog := r.getLastLog()
 	var wg sync.WaitGroup
-
 	wg.Add(len(r.peers))
-
 	go func() {
 		wg.Wait()
 		close(responseChan)
 	}()
 
+	lastCommitedEntry := r.getLastLog()
 	for _, peer := range r.peers {
 		go func(peer Node) {
 			defer wg.Done()
 
 			request := AppendEntriesRequest{
 				Term:         r.getCurrentTerm(),
-				LeaderNode:   r.localNode,
-				Entries:      newEntries,
-				PrevLogIndex: lastLog.Term,
-				PrevLogTerm:  lastLog.Term,
+				LeaderNode:   r.leaderNode,
+				Entries:      entries,
+				PrevLogIndex: lastCommitedEntry.Index,
+				PrevLogTerm:  lastCommitedEntry.Term,
 			}
 			response, error := r.transport.AppendEntries(request, peer)
 			if error != nil {
 				// Log node is probably offline or unreachable - try again with same log index next time around
 			} else {
-				responseChan <- peerResponse{peer.id, response}
+				responseChan <- appendEntriesPeerResponse{peer.id, response}
 			}
 		}(peer)
+	}
+
+	return responseChan
+}
+
+func (r *Raft) sendAppendEntries(newEntries [][]byte) error {
+	lastLog := r.getLastLog()
+
+	var newLogEntries []Log
+	currentTerm := r.getCurrentTerm()
+	nextIndex := lastLog.Index + 1
+	for _, entry := range newEntries {
+		newLogEntries = append(newLogEntries, Log{
+			Term:  currentTerm,
+			Index: nextIndex,
+			Data:  entry,
+		})
+		nextIndex++
+	}
+
+	responseChan := r.sendAppendEntriesRequest(newLogEntries)
+
+	newLastEntry := newLogEntries[len(newEntries)-1]
+
+	if len(newLogEntries) > 0 {
+		// commit new entries locally
+		r.appendEntries(newLogEntries)
 	}
 
 	writeQuorum := 1 // Count self
@@ -249,21 +288,14 @@ func (r *Raft) sendAppendEntries(newEntries []Log) error {
 	}
 
 	// In case of heartbeat, we can skip this check
-	if writeQuorum < miniumQuorum && !heartbeatRequest {
+	if writeQuorum < miniumQuorum && len(newLogEntries) > 0 {
 		return errors.New("unable to reach consensus")
 	}
 
 	if len(newEntries) > 0 {
-		// commit new entries
-		r.appendEntries(newEntries)
-
-		lastEntry := newEntries[len(newEntries)-1]
-
-		r.setLastLog(lastEntry)
-		r.setCommitIndex(lastEntry.Index)
-
+		r.setCommitIndex(newLastEntry.Index)
 		for _, peerId := range replicatedPeers {
-			r.setNextIndexForPeer(peerId, lastEntry.Index+1)
+			r.setNextIndexForPeer(peerId, newLastEntry.Index+1)
 		}
 	}
 
@@ -326,7 +358,7 @@ func (r *Raft) processAppendEntries(appendEntriesRequest AppendEntriesRequest) A
 			r.appendEntries(newEntries)
 
 			lastEntry := newEntries[len(newEntries)-1]
-			r.setLastLog(lastEntry)
+			r.setCommitIndex(lastEntry.Index)
 		}
 
 		lastNewEntry := r.getLastLog()
