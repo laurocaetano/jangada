@@ -262,8 +262,6 @@ func (r *Raft) sendAppendEntries(newEntries [][]byte) error {
 
 	responseChan := r.sendAppendEntriesRequest(newLogEntries)
 
-	newLastEntry := newLogEntries[len(newEntries)-1]
-
 	if len(newLogEntries) > 0 {
 		// commit new entries locally
 		r.appendEntries(newLogEntries)
@@ -276,9 +274,9 @@ func (r *Raft) sendAppendEntries(newEntries [][]byte) error {
 	var replicatedPeers []NodeId
 	for res := range responseChan {
 		if !res.response.Success {
-			replicatedPeers = append(replicatedPeers, res.peer)
 			r.decreaseIndexForPeer(res.peer)
 		} else {
+			replicatedPeers = append(replicatedPeers, res.peer)
 			writeQuorum++
 		}
 	}
@@ -289,6 +287,8 @@ func (r *Raft) sendAppendEntries(newEntries [][]byte) error {
 	}
 
 	if len(newEntries) > 0 {
+		newLastEntry := newLogEntries[len(newEntries)-1]
+
 		r.setCommitIndex(newLastEntry.Index)
 		for _, peerId := range replicatedPeers {
 			r.setNextIndexForPeer(peerId, newLastEntry.Index+1)

@@ -217,7 +217,142 @@ func TestLeaderElectionNotSuccessful(t *testing.T) {
 	raft.startElection()
 }
 
-func TestSendAppendEntries(t *testing.T) {
+func TestSendAppendEntriesIncreasesPeerNextIndex(t *testing.T) {
+	// A raft with no log entries yet
+	peer1 := Node{
+		id:      "node01",
+		address: "0.0.0.1",
+	}
+
+	peer2 := Node{
+		id:      "node02",
+		address: "0.0.0.2",
+	}
+
+	leaderNode := Node{
+		id:      "leaderNode",
+		address: "0.0.0.3",
+	}
+
+	peers := []Node{peer1, peer2}
+
+	fakeResponseMap := make(map[Node]AppendEntriesResponse)
+
+	fakeResponseMap[peer1] = AppendEntriesResponse{
+		Term:    1,
+		Success: true,
+	}
+
+	fakeResponseMap[peer2] = AppendEntriesResponse{
+		Term:    1,
+		Success: false,
+	}
+
+	fakeTransport := FakeTestTransport{nil, fakeResponseMap}
+
+	raft := NewRaft(peers, leaderNode, fakeTransport)
+	// Fake this current instance is the leader
+	raft.setState(Leader)
+	raft.setCurrentTerm(1)
+
+	newEntry := []byte("my new entry")
+	expectedCommitedIndex := raft.getCommitIndex() + 1
+
+	response := raft.sendAppendEntries([][]byte{newEntry})
+
+	if response != nil {
+		t.Errorf("it should have been successful, but it was not: %v", response)
+	}
+
+	// It should move the commit index
+	if raft.getCommitIndex() != expectedCommitedIndex {
+		t.Errorf("expected commit index to be %v, but was %v", expectedCommitedIndex, raft.getCommitIndex())
+	}
+
+	// it should only increase index for commited peers
+	expectedPeer1Index := raft.getCommitIndex() + 1
+	if raft.nextIndexForPeers[peer1.id] != expectedPeer1Index {
+		t.Errorf("nextIndexFor peer %v expected to be %v, got: %v",
+			peer1.id,
+			expectedPeer1Index,
+			raft.nextIndexForPeers[peer1.id],
+		)
+	}
+
+	// it should only increase index for commited peers
+	expectedPeer2Index := raft.getCommitIndex() - 1
+	if raft.nextIndexForPeers[peer2.id] != expectedPeer2Index {
+		t.Errorf("nextIndexFor peer %v expected to be %v, got: %v",
+			peer2.id,
+			expectedPeer2Index,
+			raft.nextIndexForPeers[peer2.id],
+		)
+	}
+}
+
+func TestSendAppendEntriesWithoutEntries(t *testing.T) {
+	// A raft with no log entries yet
+	peer1 := Node{
+		id:      "node01",
+		address: "0.0.0.1",
+	}
+
+	peer2 := Node{
+		id:      "node02",
+		address: "0.0.0.2",
+	}
+
+	leaderNode := Node{
+		id:      "leaderNode",
+		address: "0.0.0.3",
+	}
+
+	peers := []Node{peer1, peer2}
+
+	fakeResponseMap := make(map[Node]AppendEntriesResponse)
+
+	fakeResponseMap[peer1] = AppendEntriesResponse{
+		Term:    1,
+		Success: true,
+	}
+
+	fakeResponseMap[peer2] = AppendEntriesResponse{
+		Term:    1,
+		Success: true,
+	}
+
+	fakeTransport := FakeTestTransport{nil, fakeResponseMap}
+
+	raft := NewRaft(peers, leaderNode, fakeTransport)
+	// Fake this current instance is the leader
+	raft.setState(Leader)
+	raft.setCurrentTerm(1)
+
+	response := raft.sendAppendEntries([][]byte{})
+
+	if response != nil {
+		t.Errorf("it should have been successful, but it was not: %v", response)
+	}
+
+	// It should not move the commit index for heartbeat requests
+	if raft.getCommitIndex() > 0 {
+		t.Errorf("did not expect commit index to have increased in case of heartbeat")
+	}
+
+	// it should not increase indexes on heartbeat requests
+	expectedPeerIndex := raft.getCommitIndex() + 1
+	for _, peer := range peers {
+		if raft.nextIndexForPeers[peer.id] != expectedPeerIndex {
+			t.Errorf("nextIndexFor peer %v expected to be %v, got: %v",
+				peer.id,
+				expectedPeerIndex,
+				raft.nextIndexForPeers[peer.id],
+			)
+		}
+	}
+}
+
+func TestSendAppendEntriesWithoutQuorum(t *testing.T) {
 	// A raft with no log entries yet
 	peer1 := Node{
 		id:      "node01",
@@ -270,7 +405,7 @@ func TestSendAppendEntries(t *testing.T) {
 
 	// it should have decreased the nextIndexForPeers
 	for _, peer := range peers {
-		if raft.nextIndexForPeers[peer1.id] > 0 {
+		if raft.nextIndexForPeers[peer.id] > 0 {
 			t.Errorf("nextIndexFor peer %v expected to be %v, got: %v",
 				peer.id,
 				0,
